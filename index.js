@@ -1,23 +1,22 @@
 import express from "express";
+import { paymentMiddleware } from "x402-express";
+import { facilitator } from "@coinbase/x402";
 import cors from "cors";
 import dotenv from "dotenv";
 
 dotenv.config();
 
 // ===========================================
-// CONFIGURATION - Validate required env vars
+// CONFIGURATION
 // ===========================================
 const WALLET_ADDRESS = process.env.WALLET_ADDRESS;
 const PORT = process.env.PORT || 4021;
 const NETWORK = process.env.NETWORK || "base-sepolia";
-const FACILITATOR_URL =
-  process.env.FACILITATOR_URL || "https://x402.org/facilitator";
 
 if (!WALLET_ADDRESS) {
   console.error(
     "\n❌ FATAL: WALLET_ADDRESS environment variable is required.\n" +
-      "Set it in your .env file or deployment environment.\n" +
-      "Example: WALLET_ADDRESS=0xYourWalletAddress\n"
+      "Set it in your .env file or deployment environment.\n"
   );
   process.exit(1);
 }
@@ -30,87 +29,37 @@ if (!/^0x[a-fA-F0-9]{40}$/.test(WALLET_ADDRESS)) {
   process.exit(1);
 }
 
-// ===========================================
-// x402 V2 SDK SETUP
-// ===========================================
-let paymentMiddleware, x402ResourceServer, HTTPFacilitatorClient;
-let registerExactEvmScheme, bazaarResourceServerExtension;
-
-try {
-  ({ paymentMiddleware, x402ResourceServer } = await import("@x402/express"));
-  ({ HTTPFacilitatorClient } = await import("@x402/core/server"));
-  ({ registerExactEvmScheme } = await import("@x402/evm/exact/server"));
-  ({ bazaarResourceServerExtension } = await import(
-    "@x402/extensions/bazaar"
-  ));
-} catch (err) {
-  console.error(
-    "\n❌ Failed to load x402 V2 SDK. Ensure @x402/* packages are installed.\n",
-    err.message
-  );
-  process.exit(1);
-}
-
 const app = express();
-
-// CORS - restrict in production via CORS_ORIGINS env var
-const allowedOrigins = process.env.CORS_ORIGINS
-  ? process.env.CORS_ORIGINS.split(",")
-  : null;
-app.use(
-  cors(
-    allowedOrigins
-      ? {
-          origin: allowedOrigins,
-          methods: ["GET", "POST"],
-          allowedHeaders: [
-            "Content-Type",
-            "Authorization",
-            "X-Payment",
-            "X-Payment-Response",
-          ],
-        }
-      : undefined
-  )
-);
-
+app.use(cors());
 app.use(express.json({ limit: "500kb" }));
 
 // ===========================================
-// x402 V2 PAYMENT MIDDLEWARE + BAZAAR
+// x402 PAYMENT MIDDLEWARE
+// Uses @coinbase/x402 facilitator which handles
+// CDP auth automatically via CDP_API_KEY_ID and
+// CDP_API_KEY_SECRET environment variables
 // ===========================================
-
-// Map shorthand network names to CAIP-2 identifiers
-const NETWORK_MAP = {
-  base: "eip155:8453",
-  "base-sepolia": "eip155:84532",
-};
-const caip2Network = NETWORK_MAP[NETWORK] || NETWORK;
-
-const facilitatorClient = new HTTPFacilitatorClient({
-  url: FACILITATOR_URL,
-});
-
-const resourceServer = new x402ResourceServer(facilitatorClient);
-registerExactEvmScheme(resourceServer);
-resourceServer.registerExtension(bazaarResourceServerExtension);
-
-// x402 V2 route configuration with Bazaar discovery metadata
-const x402Routes = {
-  "POST /api/scan/quick": {
-    accepts: {
-      scheme: "exact",
-      price: "$0.05",
-      network: caip2Network,
-      payTo: WALLET_ADDRESS,
-    },
-    description:
-      "Quick vulnerability scan for Solidity smart contracts. Detects reentrancy, tx.origin, unchecked calls, floating pragma, and more.",
-    extensions: {
-      bazaar: {
-        discoverable: true,
-        inputSchema: {
-          body: {
+app.use(
+  paymentMiddleware(
+    WALLET_ADDRESS,
+    {
+      "POST /api/scan/quick": {
+        price: "$0.05",
+        network: NETWORK,
+        config: {
+          description:
+            "Quick vulnerability scan for Solidity smart contracts. Detects reentrancy, tx.origin, unchecked calls, floating pragma, and more.",
+          discoverable: true,
+          category: "security",
+          tags: [
+            "solidity",
+            "smart-contract",
+            "audit",
+            "security",
+            "ethereum",
+            "blockchain",
+          ],
+          inputSchema: {
             type: "object",
             properties: {
               code: {
@@ -124,40 +73,40 @@ const x402Routes = {
             },
             required: ["code"],
           },
-        },
-        outputSchema: {
-          type: "object",
-          properties: {
-            success: { type: "boolean" },
-            summary: {
-              type: "object",
-              properties: {
-                riskScore: { type: "number" },
-                riskLevel: { type: "string" },
-                totalIssues: { type: "number" },
+          outputSchema: {
+            type: "object",
+            properties: {
+              success: { type: "boolean" },
+              summary: {
+                type: "object",
+                properties: {
+                  riskScore: { type: "number" },
+                  riskLevel: { type: "string" },
+                  totalIssues: { type: "number" },
+                },
               },
+              vulnerabilities: { type: "array" },
             },
-            vulnerabilities: { type: "array" },
           },
         },
       },
-    },
-  },
 
-  "POST /api/scan/deep": {
-    accepts: {
-      scheme: "exact",
-      price: "$0.50",
-      network: caip2Network,
-      payTo: WALLET_ADDRESS,
-    },
-    description:
-      "Comprehensive smart contract security audit with gas optimization, best practice analysis, and prioritized recommendations.",
-    extensions: {
-      bazaar: {
-        discoverable: true,
-        inputSchema: {
-          body: {
+      "POST /api/scan/deep": {
+        price: "$0.50",
+        network: NETWORK,
+        config: {
+          description:
+            "Comprehensive smart contract security audit with gas optimization, best practice analysis, and prioritized recommendations.",
+          discoverable: true,
+          category: "security",
+          tags: [
+            "solidity",
+            "audit",
+            "security",
+            "gas-optimization",
+            "defi",
+          ],
+          inputSchema: {
             type: "object",
             properties: {
               code: {
@@ -174,23 +123,17 @@ const x402Routes = {
           },
         },
       },
-    },
-  },
 
-  "POST /api/compare": {
-    accepts: {
-      scheme: "exact",
-      price: "$0.10",
-      network: caip2Network,
-      payTo: WALLET_ADDRESS,
-    },
-    description:
-      "Compare two smart contracts to identify security differences, new vulnerabilities, and fixed issues.",
-    extensions: {
-      bazaar: {
-        discoverable: true,
-        inputSchema: {
-          body: {
+      "POST /api/compare": {
+        price: "$0.10",
+        network: NETWORK,
+        config: {
+          description:
+            "Compare two smart contracts to identify security differences, new vulnerabilities, and fixed issues.",
+          discoverable: true,
+          category: "security",
+          tags: ["solidity", "diff", "compare", "audit"],
+          inputSchema: {
             type: "object",
             properties: {
               codeA: {
@@ -202,29 +145,26 @@ const x402Routes = {
                 description: "Second contract source code",
               },
               nameA: { type: "string", description: "Name of first contract" },
-              nameB: { type: "string", description: "Name of second contract" },
+              nameB: {
+                type: "string",
+                description: "Name of second contract",
+              },
             },
             required: ["codeA", "codeB"],
           },
         },
       },
-    },
-  },
 
-  "POST /api/report": {
-    accepts: {
-      scheme: "exact",
-      price: "$1.00",
-      network: caip2Network,
-      payTo: WALLET_ADDRESS,
-    },
-    description:
-      "Generate a professional markdown security audit report suitable for investor due diligence.",
-    extensions: {
-      bazaar: {
-        discoverable: true,
-        inputSchema: {
-          body: {
+      "POST /api/report": {
+        price: "$1.00",
+        network: NETWORK,
+        config: {
+          description:
+            "Generate a professional markdown security audit report suitable for investor due diligence.",
+          discoverable: true,
+          category: "security",
+          tags: ["solidity", "audit", "report", "professional"],
+          inputSchema: {
             type: "object",
             properties: {
               code: { type: "string", description: "Solidity source code" },
@@ -237,16 +177,14 @@ const x402Routes = {
         },
       },
     },
-  },
-};
-
-app.use(paymentMiddleware(x402Routes, resourceServer));
+    facilitator
+  )
+);
 
 // ===========================================
 // SECURITY SCANNING LOGIC
 // ===========================================
 
-// Returns fresh patterns each call to avoid shared lastIndex state on global regexes
 function getVulnerabilityPatterns() {
   return [
     {
@@ -384,12 +322,16 @@ function scanContract(code) {
   const lines = code.split("\n");
 
   for (const vuln of getVulnerabilityPatterns()) {
-    const matches = code.match(new RegExp(vuln.pattern.source, vuln.pattern.flags));
+    const matches = code.match(
+      new RegExp(vuln.pattern.source, vuln.pattern.flags)
+    );
 
     if (matches) {
       const locations = [];
       for (let idx = 0; idx < lines.length; idx++) {
-        if (new RegExp(vuln.pattern.source, vuln.pattern.flags).test(lines[idx])) {
+        if (
+          new RegExp(vuln.pattern.source, vuln.pattern.flags).test(lines[idx])
+        ) {
           locations.push(idx + 1);
         }
       }
@@ -466,12 +408,10 @@ function validateSolidityInput(req, res, next) {
 app.get("/", (_req, res) => {
   res.json({
     service: "FlowState AI - Smart Contract Security Scanner",
-    version: "2.0.0",
+    version: "2.1.0",
     status: "operational",
     x402: {
-      version: 2,
-      network: caip2Network,
-      facilitator: FACILITATOR_URL,
+      network: NETWORK,
       bazaar: true,
     },
     endpoints: {
@@ -499,7 +439,8 @@ app.post("/api/scan/quick", validateSolidityInput, (req, res) => {
         riskScore,
         riskLevel: getRiskLevel(riskScore),
         totalIssues: vulnerabilities.length,
-        critical: vulnerabilities.filter((v) => v.severity === "CRITICAL").length,
+        critical: vulnerabilities.filter((v) => v.severity === "CRITICAL")
+          .length,
         high: vulnerabilities.filter((v) => v.severity === "HIGH").length,
         medium: vulnerabilities.filter((v) => v.severity === "MEDIUM").length,
         low: vulnerabilities.filter((v) => v.severity === "LOW").length,
@@ -535,7 +476,9 @@ app.post("/api/scan/deep", validateSolidityInput, (req, res) => {
       contractName: contractName || contractMatch?.[1] || "Unknown",
       timestamp: new Date().toISOString(),
       contractAnalysis: {
-        inherits: inheritsMatch ? inheritsMatch[1].split(",").map((s) => s.trim()) : [],
+        inherits: inheritsMatch
+          ? inheritsMatch[1].split(",").map((s) => s.trim())
+          : [],
         functions: functionMatches.length,
         modifiers: modifierMatches.length,
         events: eventMatches.length,
@@ -544,13 +487,18 @@ app.post("/api/scan/deep", validateSolidityInput, (req, res) => {
       securityAssessment: {
         riskScore,
         riskLevel: getRiskLevel(riskScore),
-        passedChecks: getVulnerabilityPatterns().length - vulnerabilities.length,
+        passedChecks:
+          getVulnerabilityPatterns().length - vulnerabilities.length,
         failedChecks: vulnerabilities.length,
       },
       vulnerabilities: vulnerabilities.map((v) => ({
         ...v,
         priority:
-          v.severity === "CRITICAL" ? "IMMEDIATE" : v.severity === "HIGH" ? "HIGH" : "NORMAL",
+          v.severity === "CRITICAL"
+            ? "IMMEDIATE"
+            : v.severity === "HIGH"
+              ? "HIGH"
+              : "NORMAL",
       })),
       gasOptimization: gasAnalysis,
       bestPractices: {
@@ -573,10 +521,14 @@ app.post("/api/compare", (req, res) => {
   try {
     const { codeA, codeB, nameA, nameB } = req.body;
     if (!codeA || !codeB) {
-      return res.status(400).json({ error: "Missing 'codeA' or 'codeB' field" });
+      return res
+        .status(400)
+        .json({ error: "Missing 'codeA' or 'codeB' field" });
     }
     if (typeof codeA !== "string" || typeof codeB !== "string") {
-      return res.status(400).json({ error: "'codeA' and 'codeB' must be strings" });
+      return res
+        .status(400)
+        .json({ error: "'codeA' and 'codeB' must be strings" });
     }
 
     const vulnsA = scanContract(codeA);
@@ -587,13 +539,27 @@ app.post("/api/compare", (req, res) => {
     res.json({
       success: true,
       comparison: {
-        contractA: { name: nameA || "Contract A", riskScore: scoreA, riskLevel: getRiskLevel(scoreA), issues: vulnsA.length },
-        contractB: { name: nameB || "Contract B", riskScore: scoreB, riskLevel: getRiskLevel(scoreB), issues: vulnsB.length },
+        contractA: {
+          name: nameA || "Contract A",
+          riskScore: scoreA,
+          riskLevel: getRiskLevel(scoreA),
+          issues: vulnsA.length,
+        },
+        contractB: {
+          name: nameB || "Contract B",
+          riskScore: scoreB,
+          riskLevel: getRiskLevel(scoreB),
+          issues: vulnsB.length,
+        },
         scoreDelta: scoreB - scoreA,
         securityImproved: scoreB > scoreA,
       },
-      newVulnerabilities: vulnsB.filter((vB) => !vulnsA.some((vA) => vA.id === vB.id)),
-      fixedVulnerabilities: vulnsA.filter((vA) => !vulnsB.some((vB) => vB.id === vA.id)),
+      newVulnerabilities: vulnsB.filter(
+        (vB) => !vulnsA.some((vA) => vA.id === vB.id)
+      ),
+      fixedVulnerabilities: vulnsA.filter(
+        (vA) => !vulnsB.some((vB) => vB.id === vA.id)
+      ),
       recommendation:
         scoreB >= scoreA
           ? "Contract B has equal or better security posture"
@@ -601,7 +567,9 @@ app.post("/api/compare", (req, res) => {
       poweredBy: "FlowState AI - flowstateai.agency",
     });
   } catch (error) {
-    res.status(500).json({ error: "Comparison failed", message: error.message });
+    res
+      .status(500)
+      .json({ error: "Comparison failed", message: error.message });
   }
 });
 
@@ -626,19 +594,22 @@ app.post("/api/report", validateSolidityInput, (req, res) => {
         vulnerabilities,
         riskScore,
         gasAnalysis,
-        code,
       }),
       summary: {
         riskScore,
         riskLevel: getRiskLevel(riskScore),
-        criticalIssues: vulnerabilities.filter((v) => v.severity === "CRITICAL").length,
+        criticalIssues: vulnerabilities.filter(
+          (v) => v.severity === "CRITICAL"
+        ).length,
         highIssues: vulnerabilities.filter((v) => v.severity === "HIGH").length,
         totalIssues: vulnerabilities.length,
       },
       poweredBy: "FlowState AI Security Audit - flowstateai.agency",
     });
   } catch (error) {
-    res.status(500).json({ error: "Report generation failed", message: error.message });
+    res
+      .status(500)
+      .json({ error: "Report generation failed", message: error.message });
   }
 });
 
@@ -649,21 +620,45 @@ app.post("/api/report", validateSolidityInput, (req, res) => {
 function generateRecommendations(vulnerabilities, code) {
   const recs = [];
   if (vulnerabilities.some((v) => v.id === "REENTRANCY")) {
-    recs.push({ priority: "CRITICAL", action: "Implement ReentrancyGuard from OpenZeppelin", code: "import '@openzeppelin/contracts/security/ReentrancyGuard.sol';" });
+    recs.push({
+      priority: "CRITICAL",
+      action: "Implement ReentrancyGuard from OpenZeppelin",
+      code: "import '@openzeppelin/contracts/security/ReentrancyGuard.sol';",
+    });
   }
   if (!code.includes("Ownable") && !code.includes("onlyOwner")) {
-    recs.push({ priority: "HIGH", action: "Add access control to administrative functions", code: "import '@openzeppelin/contracts/access/Ownable.sol';" });
+    recs.push({
+      priority: "HIGH",
+      action: "Add access control to administrative functions",
+      code: "import '@openzeppelin/contracts/access/Ownable.sol';",
+    });
   }
   if (vulnerabilities.some((v) => v.id === "FLOATING_PRAGMA")) {
-    recs.push({ priority: "MEDIUM", action: "Lock Solidity version", code: "pragma solidity 0.8.24;" });
+    recs.push({
+      priority: "MEDIUM",
+      action: "Lock Solidity version",
+      code: "pragma solidity 0.8.24;",
+    });
   }
   if (vulnerabilities.some((v) => v.id === "TX_ORIGIN")) {
-    recs.push({ priority: "HIGH", action: "Replace tx.origin with msg.sender", code: "require(msg.sender == owner, 'Not authorized');" });
+    recs.push({
+      priority: "HIGH",
+      action: "Replace tx.origin with msg.sender",
+      code: "require(msg.sender == owner, 'Not authorized');",
+    });
   }
   return recs;
 }
 
-function generateMarkdownReport({ reportId, contractName, clientName, projectName, vulnerabilities, riskScore, gasAnalysis }) {
+function generateMarkdownReport({
+  reportId,
+  contractName,
+  clientName,
+  projectName,
+  vulnerabilities,
+  riskScore,
+  gasAnalysis,
+}) {
   const bySeverity = (s) => vulnerabilities.filter((v) => v.severity === s);
   return `# Smart Contract Security Audit Report
 
@@ -694,9 +689,12 @@ Automated audit of the ${contractName} smart contract identified **${vulnerabili
 
 ## Findings
 
-${vulnerabilities.length === 0
+${
+  vulnerabilities.length === 0
     ? "No vulnerabilities detected. This automated scan does not replace a manual audit.\n"
-    : vulnerabilities.map((v, i) => `### ${i + 1}. ${v.name}
+    : vulnerabilities
+        .map(
+          (v, i) => `### ${i + 1}. ${v.name}
 - **Severity:** ${v.severity}
 - **ID:** ${v.id}
 - **Occurrences:** ${v.occurrences}
@@ -705,15 +703,20 @@ ${vulnerabilities.length === 0
 **Description:** ${v.description}
 
 **Recommendation:** ${v.recommendation}
-`).join("\n")}
+`
+        )
+        .join("\n")
+}
 
 ---
 
 ## Gas Optimization
 
-${gasAnalysis.length > 0
+${
+  gasAnalysis.length > 0
     ? gasAnalysis.map((g) => `- **${g.issue}:** ${g.suggestion}`).join("\n")
-    : "No significant gas optimization issues detected."}
+    : "No significant gas optimization issues detected."
+}
 
 ---
 
@@ -740,13 +743,13 @@ app.use((err, _req, res, _next) => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`
 ╔═══════════════════════════════════════════════════════════╗
-║   FlowState AI - Smart Contract Security Scanner v2.0     ║
-║   x402 V2 Payment-Enabled API + Bazaar Discovery          ║
+║   FlowState AI - Smart Contract Security Scanner v2.1     ║
+║   x402 Payment-Enabled API + Bazaar Discovery             ║
 ╠═══════════════════════════════════════════════════════════╣
 ║   Server:      http://0.0.0.0:${String(PORT).padEnd(29)}║
-║   Network:     ${caip2Network.padEnd(40)}║
+║   Network:     ${NETWORK.padEnd(40)}║
 ║   Wallet:      ${WALLET_ADDRESS.slice(0, 10)}...${WALLET_ADDRESS.slice(-6)}                          ║
-║   Facilitator: ${FACILITATOR_URL.slice(0, 40).padEnd(40)}║
+║   CDP Auth:    ${process.env.CDP_API_KEY_ID ? "Configured" : "Not set (testnet only)"}                              ║
 ╠═══════════════════════════════════════════════════════════╣
 ║   ENDPOINTS (Bazaar Discoverable):                        ║
 ║   POST /api/scan/quick  - Quick scan .............. $0.05 ║
